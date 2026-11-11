@@ -1,18 +1,29 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
+import 'package:immich_mobile/utils/debug_print.dart';
 import 'package:immich_mobile/widgets/map/map_thumbnail.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:immich_mobile/utils/debug_print.dart';
 
 class ExifMap extends StatelessWidget {
   final ExifInfo exifInfo;
+  // TODO: Pass in a BaseAsset instead of the ID and thumbhash when removing old timeline
+  // This is currently structured this way because of the old timeline implementation
+  // reusing this component
   final String? markerId;
+  final String? markerAssetThumbhash;
   final MapCreatedCallback? onMapCreated;
 
-  const ExifMap({super.key, required this.exifInfo, this.markerId = 'marker', this.onMapCreated});
+  const ExifMap({
+    super.key,
+    required this.exifInfo,
+    this.markerAssetThumbhash,
+    this.markerId = 'marker',
+    this.onMapCreated,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -28,7 +39,7 @@ class ExifMap extends StatelessWidget {
       const zoomLevel = 16;
 
       if (Platform.isAndroid) {
-        Uri uri = Uri(
+        final Uri uri = Uri(
           scheme: 'geo',
           host: '$latitude,$longitude',
           queryParameters: {'z': '$zoomLevel', 'q': '$latitude,$longitude'},
@@ -37,8 +48,8 @@ class ExifMap extends StatelessWidget {
           return uri;
         }
       } else if (Platform.isIOS) {
-        var params = {'ll': '$latitude,$longitude', 'q': '$latitude,$longitude', 'z': '$zoomLevel'};
-        Uri uri = Uri.https('maps.apple.com', '/', params);
+        final params = {'ll': '$latitude,$longitude', 'q': '$latitude,$longitude', 'z': '$zoomLevel'};
+        final Uri uri = Uri.https('maps.apple.com', '/', params);
         if (await canLaunchUrl(uri)) {
           return uri;
         }
@@ -60,15 +71,16 @@ class ExifMap extends StatelessWidget {
           width: constraints.maxWidth,
           zoom: 12.0,
           assetMarkerRemoteId: markerId,
+          assetThumbhash: markerAssetThumbhash,
           onTap: (tapPosition, latLong) async {
-            Uri? uri = await createCoordinatesUri();
+            final Uri? uri = await createCoordinatesUri();
 
             if (uri == null) {
               return;
             }
 
             dPrint(() => 'Opening Map Uri: $uri');
-            launchUrl(uri);
+            unawaited(launchUrl(uri));
           },
           onCreated: onMapCreated,
         );

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
   import { Icon, Modal, ModalBody } from '@immich/ui';
   import { mdiInformationOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';
@@ -27,6 +28,7 @@
         { key: ['D', 'd'], action: $t('previous_or_next_day') },
         { key: ['M', 'm'], action: $t('previous_or_next_month') },
         { key: ['Y', 'y'], action: $t('previous_or_next_year') },
+        { key: ['g'], action: $t('navigate_to_time') },
         { key: ['x'], action: $t('select') },
         { key: ['Esc'], action: $t('back_close_deselect') },
         { key: ['Ctrl', 'k'], action: $t('search_your_photos') },
@@ -37,12 +39,16 @@
         { key: ['i'], action: $t('show_or_hide_info') },
         { key: ['s'], action: $t('stack_selected_photos') },
         { key: ['l'], action: $t('add_to_album') },
+        { key: ['⇧', 'l'], action: $t('remove_from_album') },
         { key: ['t'], action: $t('tag_assets') },
-        { key: ['⇧', 'l'], action: $t('add_to_shared_album') },
+        { key: ['p'], action: $t('tag_people') },
         { key: ['⇧', 'a'], action: $t('archive_or_unarchive_photo') },
         { key: ['⇧', 'd'], action: $t('download') },
         { key: ['Space'], action: $t('play_or_pause_video') },
         { key: ['Del'], action: $t('trash_delete_asset'), info: $t('shift_to_permanent_delete') },
+        ...(authManager.authenticated && authManager.preferences.ratings.enabled
+          ? [{ key: ['0-5'], action: $t('rate_asset'), info: $t('rate_asset_description') }]
+          : []),
       ],
     },
   }: Props = $props();
@@ -66,7 +72,7 @@
                     </p>
                   {/each}
                 </div>
-                <p class="mb-1 mt-1 flex">{shortcut.action}</p>
+                <p class="my-1 flex">{shortcut.action}</p>
               </div>
             {/each}
           </div>
@@ -88,7 +94,7 @@
                   {/each}
                 </div>
                 <div class="flex items-center gap-2">
-                  <p class="mb-1 mt-1 flex">{shortcut.action}</p>
+                  <p class="my-1 flex">{shortcut.action}</p>
                   {#if shortcut.info}
                     <Icon icon={mdiInformationOutline} title={shortcut.info} />
                   {/if}

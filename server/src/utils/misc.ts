@@ -1,26 +1,27 @@
-import { INestApplication } from '@nestjs/common';
+import { BadRequestException, INestApplication } from '@nestjs/common';
 import {
+  ApiBodyOptions,
   DocumentBuilder,
   OpenAPIObject,
   SwaggerCustomOptions,
   SwaggerDocumentOptions,
   SwaggerModule,
 } from '@nestjs/swagger';
-import {
-  OperationObject,
-  ReferenceObject,
-  SchemaObject,
-} from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
-import _ from 'lodash';
+import { get, isArray, isDate, isEmpty, isObject, orderBy, unset } from 'lodash-es';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import picomatch from 'picomatch';
-import parse from 'picomatch/lib/parse';
-import { SystemConfig } from 'src/config';
-import { CLIP_MODEL_INFO, serverVersion } from 'src/constants';
-import { extraSyncModels } from 'src/dtos/sync.dto';
-import { ApiCustomExtension, ImmichCookie, ImmichHeader, MetadataKey } from 'src/enum';
-import { LoggingRepository } from 'src/repositories/logging.repository';
+import { CLIP_MODEL_INFO, JOBS_ASSET_PAGINATION_SIZE, endpointTags, serverVersion } from 'src/constants.js';
+import { extraModels } from 'src/decorators.js';
+import { SystemConfig } from 'src/dtos/config.dto.js';
+import { ApiCustomExtension, ImmichCookie, ImmichHeader, MetadataKey } from 'src/enum.js';
+import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import { patchOpenApiParameters, toOpenApiComponents, toOpenApiSchema } from 'src/zod.js';
+
+type OperationObject = NonNullable<OpenAPIObject['paths'][string]['get']>;
+type ReferenceOrSchemaObject = Extract<ApiBodyOptions, { schema: unknown }>['schema'];
+type ReferenceObject = Extract<ReferenceOrSchemaObject, { $ref: unknown }>;
+type SchemaObject = Exclude<ReferenceOrSchemaObject, ReferenceObject>;
 
 export class ImmichStartupError extends Error {}
 export const isStartUpError = (error: unknown): error is ImmichStartupError => error instanceof ImmichStartupError;
@@ -51,9 +52,7 @@ export const getMethodNames = (instance: any) => {
 export const getExternalDomain = (server: SystemConfig['server'], defaultDomain = 'https://my.immich.app') =>
   server.externalDomain || defaultDomain;
 
-/**
- * @returns a list of strings representing the keys of the object in dot notation
- */
+/** @returns a list of strings representing the keys of the object in dot notation */
 export const getKeysDeep = (target: unknown, path: string[] = []) => {
   if (!target || typeof target !== 'object') {
     return [];
@@ -68,7 +67,7 @@ export const getKeysDeep = (target: unknown, path: string[] = []) => {
       continue;
     }
 
-    if (_.isObject(value) && !_.isArray(value) && !_.isDate(value)) {
+    if (isObject(value) && !isArray(value) && !isDate(value)) {
       properties.push(...getKeysDeep(value, [...path, key]));
       continue;
     }
@@ -82,30 +81,60 @@ export const getKeysDeep = (target: unknown, path: string[] = []) => {
 export const unsetDeep = (object: unknown, key: string) => {
   const parts = key.split('.');
   while (parts.length > 0) {
-    _.unset(object, parts);
+    unset(object, parts);
     parts.pop();
-    if (!_.isEmpty(_.get(object, parts))) {
+    if (!isEmpty(get(object, parts))) {
       break;
     }
   }
 
-  return _.isEmpty(object) ? undefined : object;
+  return isEmpty(object) ? undefined : object;
 };
 
 const isMachineLearningEnabled = (machineLearning: SystemConfig['machineLearning']) => machineLearning.enabled;
 export const isSmartSearchEnabled = (machineLearning: SystemConfig['machineLearning']) =>
   isMachineLearningEnabled(machineLearning) && machineLearning.clip.enabled;
+export const isOcrEnabled = (machineLearning: SystemConfig['machineLearning']) =>
+  isMachineLearningEnabled(machineLearning) && machineLearning.ocr.enabled;
 export const isFacialRecognitionEnabled = (machineLearning: SystemConfig['machineLearning']) =>
   isMachineLearningEnabled(machineLearning) && machineLearning.facialRecognition.enabled;
 export const isDuplicateDetectionEnabled = (machineLearning: SystemConfig['machineLearning']) =>
   isSmartSearchEnabled(machineLearning) && machineLearning.duplicateDetection.enabled;
 export const isFaceImportEnabled = (metadata: SystemConfig['metadata']) => metadata.faces.import;
 
-export const isConnectionAborted = (error: Error | any) => error.code === 'ECONNABORTED';
-
 export const handlePromiseError = <T>(promise: Promise<T>, logger: LoggingRepository): void => {
   promise.catch((error: Error | any) => logger.error(`Promise error: ${error}`, error?.stack));
 };
+
+export const hasSomeDefined = (values: unknown[]) => values.some((value) => value !== undefined);
+
+export const findOrFail = async <T>(find: () => Promise<T>, entity: string): Promise<NonNullable<T>> => {
+  const value = await find();
+  if (!value) {
+    throw new BadRequestException(`${entity} not found`);
+  }
+
+  return value;
+};
+
+export async function* batched<T>(items: AsyncIterable<T>, size = JOBS_ASSET_PAGINATION_SIZE): AsyncGenerator<T[]> {
+  let batch: T[] = [];
+
+  for await (const item of items) {
+    batch.push(item);
+
+    if (batch.length < size) {
+      continue;
+    }
+
+    yield batch;
+    batch = [];
+  }
+
+  if (batch.length > 0) {
+    yield batch;
+  }
+}
 
 export interface OpenGraphTags {
   title: string;
@@ -131,55 +160,129 @@ export function getCLIPModelInfo(modelName: string) {
   return modelInfo;
 }
 
+const canonicalize = (document: OpenAPIObject): OpenAPIObject => {
+  for (const path of Object.values(document.paths)) {
+    for (const operation of Object.values(path)) {
+      if (hasParameters(operation)) {
+        operation.parameters = orderBy(operation.parameters, 'name');
+      }
+    }
+  }
+
+  return Object.fromEntries(Object.entries(document).map(([key, value]) => [key, sortKeys(value)])) as OpenAPIObject;
+};
+
+const hasParameters = (value: unknown): value is { parameters: Array<{ name?: string }> } =>
+  typeof value === 'object' && value !== null && 'parameters' in value && Array.isArray(value.parameters);
+
 function sortKeys<T>(target: T): T {
-  if (!target || typeof target !== 'object' || Array.isArray(target)) {
+  if (!target || typeof target !== 'object') {
     return target;
   }
 
+  if (Array.isArray(target)) {
+    return target.map((item) => sortKeys(item)) as T;
+  }
+
   const result: Partial<T> = {};
-  const keys = Object.keys(target).sort() as Array<keyof T>;
+  const keys = Object.keys(target).toSorted() as Array<keyof T>;
   for (const key of keys) {
-    result[key] = sortKeys(target[key]);
+    const value = target[key];
+    result[key] = key === 'required' && isStringArray(value) ? (value.toSorted() as T[keyof T]) : sortKeys(value);
   }
   return result as T;
 }
+
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === 'string');
 
 export const routeToErrorMessage = (methodName: string) =>
   'Failed to ' + methodName.replaceAll(/[A-Z]+/g, (letter) => ` ${letter.toLowerCase()}`);
 
 const isSchema = (schema: string | ReferenceObject | SchemaObject): schema is SchemaObject => {
-  if (typeof schema === 'string' || '$ref' in schema) {
-    return false;
-  }
-
-  return true;
+  return !(typeof schema === 'string' || '$ref' in schema);
 };
 
 const patchOpenAPI = (document: OpenAPIObject) => {
-  document.paths = sortKeys(document.paths);
+  const removeOpenApi30IncompatibleKeys = (target: unknown) => {
+    if (!target || typeof target !== 'object') {
+      return;
+    }
+
+    if (Array.isArray(target)) {
+      for (const item of target) {
+        removeOpenApi30IncompatibleKeys(item);
+      }
+      return;
+    }
+
+    const object = target as Record<string, unknown>;
+    delete object.propertyNames;
+    delete object.contentEncoding;
+
+    for (const value of Object.values(object)) {
+      removeOpenApi30IncompatibleKeys(value);
+    }
+  };
+
+  // Allowed in OpenAPI v3.1 (JSON Schema 2020-12), but not in OpenAPI v3.0 (current spec).
+  removeOpenApi30IncompatibleKeys(document);
+  patchOpenApiParameters(document);
 
   if (document.components?.schemas) {
     const schemas = document.components.schemas as Record<string, SchemaObject>;
 
-    document.components.schemas = sortKeys(schemas);
+    for (const schema of Object.values(schemas)) {
+      delete (schema as Record<string, unknown>).id;
+
+      // documents a property as required even though it is optional during body validation
+      for (const [key, value] of Object.entries(schema.properties ?? {})) {
+        if (!(ApiCustomExtension.Required in value)) {
+          continue;
+        }
+
+        delete (value as Record<string, unknown>)[ApiCustomExtension.Required];
+        (schema.required ??= []).push(key);
+      }
+    }
+
+    const errors: string[] = [];
 
     for (const [schemaName, schema] of Object.entries(schemas)) {
-      if (schema.properties) {
-        schema.properties = sortKeys(schema.properties);
+      if (!schema.properties) {
+        continue;
+      }
 
-        for (const [key, value] of Object.entries(schema.properties)) {
-          if (typeof value === 'string') {
-            continue;
-          }
+      schema.properties = sortKeys(schema.properties);
 
-          if (isSchema(value) && value.type === 'number' && value.format === 'float') {
-            throw new Error(`Invalid number format: ${schemaName}.${key}=float (use double instead). `);
-          }
+      for (const [key, initialValue] of Object.entries(schema.properties)) {
+        if (typeof initialValue === 'string' || !isSchema(initialValue)) {
+          continue;
         }
 
-        if (schema.required) {
-          schema.required = schema.required.sort();
+        // check array types
+        let value: SchemaObject | ReferenceObject = initialValue;
+        if (value.type === 'array' && value.items) {
+          value = value.items;
         }
+
+        if (!(isSchema(value) && value.type === 'number')) {
+          continue;
+        }
+
+        if (value.format === 'float') {
+          errors.push(`Invalid number format: ${schemaName}.${key}=float (use double instead). `);
+        }
+
+        // verify it was meant to be a number (and not an integer)
+        if (!value.format) {
+          errors.push(
+            `${schemaName}.${key} is a number (not an integer) and requires a format (e.g .meta({ format: 'double' })). `,
+          );
+        }
+      }
+      if (errors.length > 0) {
+        throw new Error(`Schema validation failed:\n  ${errors.join('\n  ')}`);
       }
     }
   }
@@ -216,25 +319,12 @@ const patchOpenAPI = (document: OpenAPIObject) => {
         delete operation.summary;
       }
 
-      if (operation.operationId) {
-        // console.log(`${routeToErrorMessage(operation.operationId).padEnd(40)} (${operation.operationId})`);
+      if (operation.description === '') {
+        delete operation.description;
       }
 
-      const adminOnly = operation[ApiCustomExtension.AdminOnly] ?? false;
-      const permission = operation[ApiCustomExtension.Permission];
-      if (permission) {
-        let description = (operation.description || '').trim();
-        if (description && !description.endsWith('.')) {
-          description += '. ';
-        }
-
-        operation.description =
-          description +
-          `This endpoint ${adminOnly ? 'is an admin-only route, and ' : ''}requires the \`${permission}\` permission.`;
-
-        if (operation.parameters) {
-          operation.parameters = _.orderBy(operation.parameters, 'name');
-        }
+      if (operation.operationId) {
+        // console.log(`${routeToErrorMessage(operation.operationId).padEnd(40)} (${operation.operationId})`);
       }
     }
   }
@@ -243,7 +333,7 @@ const patchOpenAPI = (document: OpenAPIObject) => {
 };
 
 export const useSwagger = (app: INestApplication, { write }: { write: boolean }) => {
-  const config = new DocumentBuilder()
+  const builder = new DocumentBuilder()
     .setTitle('Immich')
     .setDescription('Immich API')
     .setVersion(serverVersion.toString())
@@ -261,15 +351,24 @@ export const useSwagger = (app: INestApplication, { write }: { write: boolean })
       },
       MetadataKey.ApiKeySecurity,
     )
-    .addServer('/api')
-    .build();
+    .addServer('/api');
+
+  for (const [tag, description] of Object.entries(endpointTags)) {
+    builder.addTag(tag, description);
+  }
+  const config = builder.build();
 
   const options: SwaggerDocumentOptions = {
     operationIdFactory: (controllerKey: string, methodKey: string) => methodKey,
-    extraModels: extraSyncModels,
+    ignoreGlobalPrefix: true,
+    standardSchemaConverter: toOpenApiSchema,
   };
 
   const specification = SwaggerModule.createDocument(app, config, options);
+  specification.components = {
+    ...specification.components,
+    schemas: { ...specification.components?.schemas, ...toOpenApiComponents(extraModels) },
+  };
 
   const customOptions: SwaggerCustomOptions = {
     swaggerOptions: {
@@ -282,43 +381,25 @@ export const useSwagger = (app: INestApplication, { write }: { write: boolean })
 
   SwaggerModule.setup('doc', app, specification, customOptions);
 
-  if (write) {
-    // Generate API Documentation only in development mode
-    const outputPath = path.resolve(process.cwd(), '../open-api/immich-openapi-specs.json');
-    writeFileSync(outputPath, JSON.stringify(patchOpenAPI(specification), null, 2), { encoding: 'utf8' });
+  // Generate API Documentation only in development mode
+  if (!write) {
+    return;
   }
+
+  const outputPath = path.resolve(process.cwd(), '../open-api/immich-openapi-specs.json');
+  writeFileSync(outputPath, JSON.stringify(canonicalize(patchOpenAPI(specification)), null, 2), { encoding: 'utf8' });
 };
 
-const convertTokenToSqlPattern = (token: parse.Token): string => {
-  switch (token.type) {
-    case 'slash': {
-      return '/';
-    }
-    case 'text': {
-      return token.value;
-    }
-    case 'globstar':
-    case 'star': {
-      return '%';
-    }
-    case 'underscore': {
-      return String.raw`\_`;
-    }
-    case 'qmark': {
-      return '_';
-    }
-    case 'dot': {
-      return '.';
-    }
-    default: {
-      return '';
-    }
-  }
-};
-
-export const globToSqlPattern = (glob: string) => {
-  const tokens = picomatch.parse(glob).tokens;
-  return tokens.map((token) => convertTokenToSqlPattern(token)).join('');
+// Offline detection and the re-online check must share one matcher, or an asset flips state on every scan
+export const createLibraryMatcher = ({
+  importPaths,
+  exclusionPatterns,
+}: {
+  importPaths: string[];
+  exclusionPatterns: string[];
+}) => {
+  const isExcluded = picomatch(exclusionPatterns, { nocase: true });
+  return (path: string) => importPaths.some((importPath) => path.startsWith(importPath)) && !isExcluded(path);
 };
 
 export function clamp(value: number, min: number, max: number) {

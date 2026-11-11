@@ -1,14 +1,15 @@
-import { plainToInstance } from 'class-transformer';
-import { defaults, SystemConfig } from 'src/config';
-import { AlbumUser } from 'src/database';
-import { SystemConfigDto } from 'src/dtos/system-config.dto';
-import { AssetFileType, JobName, JobStatus, UserMetadataKey } from 'src/enum';
-import { NotificationService } from 'src/services/notification.service';
-import { INotifyAlbumUpdateJob } from 'src/types';
-import { albumStub } from 'test/fixtures/album.stub';
-import { assetStub } from 'test/fixtures/asset.stub';
-import { userStub } from 'test/fixtures/user.stub';
-import { newTestService, ServiceMocks } from 'test/utils';
+import { AdminConfigDto, SystemConfig, defaults } from 'src/dtos/config.dto.js';
+import { AssetFileType, JobName, JobStatus, UserMetadataKey } from 'src/enum.js';
+import { NotificationService } from 'src/services/notification.service.js';
+import { AlbumFactory } from 'test/factories/album.factory.js';
+import { AssetFileFactory } from 'test/factories/asset-file.factory.js';
+import { AssetFactory } from 'test/factories/asset.factory.js';
+import { UserFactory } from 'test/factories/user.factory.js';
+import { notificationStub } from 'test/fixtures/notification.stub.js';
+import { userStub } from 'test/fixtures/user.stub.js';
+import { getForAlbum } from 'test/mappers.js';
+import { newUuid } from 'test/small.factory.js';
+import { ServiceMocks, newTestService } from 'test/utils.js';
 
 const configs = {
   smtpDisabled: Object.freeze<SystemConfig>({
@@ -39,6 +40,7 @@ const configs = {
           ignoreCert: false,
           host: 'localhost',
           port: 587,
+          secure: false,
           username: 'test',
           password: 'test',
         },
@@ -63,8 +65,29 @@ describe(NotificationService.name, () => {
     it('should emit client and server events', () => {
       const update = { oldConfig: defaults, newConfig: defaults };
       expect(sut.onConfigUpdate(update)).toBeUndefined();
-      expect(mocks.event.clientBroadcast).toHaveBeenCalledWith('on_config_update');
-      expect(mocks.event.serverSend).toHaveBeenCalledWith('ConfigUpdate', update);
+      expect(mocks.websocket.clientBroadcast).toHaveBeenCalledWith('on_config_update');
+      expect(mocks.websocket.serverSend).toHaveBeenCalledWith('ConfigUpdate', update);
+    });
+  });
+
+  describe('onLibraryCreate', () => {
+    it('should relay the event to other servers', () => {
+      sut.onLibraryCreate();
+      expect(mocks.websocket.serverSend).toHaveBeenCalledWith('LibraryCreate');
+    });
+  });
+
+  describe('onLibraryUpdate', () => {
+    it('should relay the event to other servers', () => {
+      sut.onLibraryUpdate();
+      expect(mocks.websocket.serverSend).toHaveBeenCalledWith('LibraryUpdate');
+    });
+  });
+
+  describe('onLibraryDelete', () => {
+    it('should relay the event to other servers', () => {
+      sut.onLibraryDelete();
+      expect(mocks.websocket.serverSend).toHaveBeenCalledWith('LibraryDelete');
     });
   });
 
@@ -97,7 +120,7 @@ describe(NotificationService.name, () => {
 
     it('skips smtp validation with DTO when there are no changes', async () => {
       const oldConfig = { ...configs.smtpEnabled };
-      const newConfig = plainToInstance(SystemConfigDto, configs.smtpEnabled);
+      const newConfig = configs.smtpEnabled as AdminConfigDto;
 
       await expect(sut.onConfigValidate({ oldConfig, newConfig })).resolves.not.toThrow();
       expect(mocks.email.verifySmtp).not.toHaveBeenCalled();
@@ -123,7 +146,7 @@ describe(NotificationService.name, () => {
   describe('onAssetHide', () => {
     it('should send connected clients an event', () => {
       sut.onAssetHide({ assetId: 'asset-id', userId: 'user-id' });
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_asset_hidden', 'user-id', 'asset-id');
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_asset_hidden', 'user-id', 'asset-id');
     });
   });
 
@@ -153,21 +176,29 @@ describe(NotificationService.name, () => {
   });
 
   describe('onAlbumUpdateEvent', () => {
-    it('should queue notify album update event', async () => {
-      await sut.onAlbumUpdate({ id: 'album', recipientId: '42' });
-      expect(mocks.job.queue).toHaveBeenCalledWith({
+    it('should send a websocket event to every user and queue notify jobs for recipients', async () => {
+      await sut.onAlbumUpdate({ id: 'album', userIds: ['1', '42'], recipientIds: ['42'] });
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_album_update', '1', 'album');
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_album_update', '42', 'album');
+      expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
         name: JobName.NotifyAlbumUpdate,
         data: { id: 'album', recipientId: '42', delay: 300_000 },
       });
+    });
+
+    it('should not queue email jobs when there are no recipients', async () => {
+      await sut.onAlbumUpdate({ id: 'album', userIds: ['1'], recipientIds: [] });
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_album_update', '1', 'album');
+      expect(mocks.job.queue).not.toHaveBeenCalled();
     });
   });
 
   describe('onAlbumInviteEvent', () => {
     it('should queue notify album invite event', async () => {
-      await sut.onAlbumInvite({ id: '', userId: '42' });
+      await sut.onAlbumInvite({ id: '', userId: '42', senderName: 'foo' });
       expect(mocks.job.queue).toHaveBeenCalledWith({
         name: JobName.NotifyAlbumInvite,
-        data: { id: '', recipientId: '42' },
+        data: { id: '', recipientId: '42', senderName: 'foo' },
       });
     });
   });
@@ -176,67 +207,67 @@ describe(NotificationService.name, () => {
     it('should send a on_session_delete client event', () => {
       vi.useFakeTimers();
       sut.onSessionDelete({ sessionId: 'id' });
-      expect(mocks.event.clientSend).not.toHaveBeenCalled();
+      expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
 
       vi.advanceTimersByTime(500);
 
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_session_delete', 'id', 'id');
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_session_delete', 'id', 'id');
     });
   });
 
   describe('onAssetTrash', () => {
-    it('should send connected clients an event', () => {
+    it('should send connected clients an websocket', () => {
       sut.onAssetTrash({ assetId: 'asset-id', userId: 'user-id' });
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_asset_trash', 'user-id', ['asset-id']);
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_asset_trash', 'user-id', ['asset-id']);
     });
   });
 
   describe('onAssetDelete', () => {
     it('should send connected clients an event', () => {
       sut.onAssetDelete({ assetId: 'asset-id', userId: 'user-id' });
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_asset_delete', 'user-id', 'asset-id');
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_asset_delete', 'user-id', 'asset-id');
     });
   });
 
   describe('onAssetsTrash', () => {
     it('should send connected clients an event', () => {
       sut.onAssetsTrash({ assetIds: ['asset-id'], userId: 'user-id' });
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_asset_trash', 'user-id', ['asset-id']);
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_asset_trash', 'user-id', ['asset-id']);
     });
   });
 
   describe('onAssetsRestore', () => {
     it('should send connected clients an event', () => {
       sut.onAssetsRestore({ assetIds: ['asset-id'], userId: 'user-id' });
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_asset_restore', 'user-id', ['asset-id']);
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_asset_restore', 'user-id', ['asset-id']);
     });
   });
 
   describe('onStackCreate', () => {
     it('should send connected clients an event', () => {
       sut.onStackCreate({ stackId: 'stack-id', userId: 'user-id' });
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_asset_stack_update', 'user-id');
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_asset_stack_update', 'user-id');
     });
   });
 
   describe('onStackUpdate', () => {
     it('should send connected clients an event', () => {
       sut.onStackUpdate({ stackId: 'stack-id', userId: 'user-id' });
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_asset_stack_update', 'user-id');
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_asset_stack_update', 'user-id');
     });
   });
 
   describe('onStackDelete', () => {
     it('should send connected clients an event', () => {
       sut.onStackDelete({ stackId: 'stack-id', userId: 'user-id' });
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_asset_stack_update', 'user-id');
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_asset_stack_update', 'user-id');
     });
   });
 
   describe('onStacksDelete', () => {
     it('should send connected clients an event', () => {
       sut.onStacksDelete({ stackIds: ['stack-id'], userId: 'user-id' });
-      expect(mocks.event.clientSend).toHaveBeenCalledWith('on_asset_stack_update', 'user-id');
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith('on_asset_stack_update', 'user-id');
     });
   });
 
@@ -260,19 +291,23 @@ describe(NotificationService.name, () => {
 
   describe('handleAlbumInvite', () => {
     it('should skip if album could not be found', async () => {
-      await expect(sut.handleAlbumInvite({ id: '', recipientId: '' })).resolves.toBe(JobStatus.Skipped);
+      await expect(sut.handleAlbumInvite({ id: '', recipientId: '', senderName: 'foo' })).resolves.toBe(
+        JobStatus.Skipped,
+      );
       expect(mocks.user.get).not.toHaveBeenCalled();
     });
 
     it('should skip if recipient could not be found', async () => {
-      mocks.album.getById.mockResolvedValue(albumStub.empty);
+      mocks.album.getById.mockResolvedValue(getForAlbum(AlbumFactory.create()));
 
-      await expect(sut.handleAlbumInvite({ id: '', recipientId: '' })).resolves.toBe(JobStatus.Skipped);
+      await expect(sut.handleAlbumInvite({ id: '', recipientId: '', senderName: 'foo' })).resolves.toBe(
+        JobStatus.Skipped,
+      );
       expect(mocks.job.queue).not.toHaveBeenCalled();
     });
 
     it('should skip if the recipient has email notifications disabled', async () => {
-      mocks.album.getById.mockResolvedValue(albumStub.empty);
+      mocks.album.getById.mockResolvedValue(getForAlbum(AlbumFactory.create()));
       mocks.user.get.mockResolvedValue({
         ...userStub.user1,
         metadata: [
@@ -282,12 +317,15 @@ describe(NotificationService.name, () => {
           },
         ],
       });
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
 
-      await expect(sut.handleAlbumInvite({ id: '', recipientId: '' })).resolves.toBe(JobStatus.Skipped);
+      await expect(sut.handleAlbumInvite({ id: '', recipientId: '', senderName: 'foo' })).resolves.toBe(
+        JobStatus.Skipped,
+      );
     });
 
     it('should skip if the recipient has email notifications for album invite disabled', async () => {
-      mocks.album.getById.mockResolvedValue(albumStub.empty);
+      mocks.album.getById.mockResolvedValue(getForAlbum(AlbumFactory.create()));
       mocks.user.get.mockResolvedValue({
         ...userStub.user1,
         metadata: [
@@ -297,12 +335,15 @@ describe(NotificationService.name, () => {
           },
         ],
       });
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
 
-      await expect(sut.handleAlbumInvite({ id: '', recipientId: '' })).resolves.toBe(JobStatus.Skipped);
+      await expect(sut.handleAlbumInvite({ id: '', recipientId: '', senderName: 'foo' })).resolves.toBe(
+        JobStatus.Skipped,
+      );
     });
 
     it('should send invite email', async () => {
-      mocks.album.getById.mockResolvedValue(albumStub.empty);
+      mocks.album.getById.mockResolvedValue(getForAlbum(AlbumFactory.create()));
       mocks.user.get.mockResolvedValue({
         ...userStub.user1,
         metadata: [
@@ -313,9 +354,12 @@ describe(NotificationService.name, () => {
         ],
       });
       mocks.systemMetadata.get.mockResolvedValue({ server: {} });
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
       mocks.email.renderEmail.mockResolvedValue({ html: '', text: '' });
 
-      await expect(sut.handleAlbumInvite({ id: '', recipientId: '' })).resolves.toBe(JobStatus.Success);
+      await expect(sut.handleAlbumInvite({ id: '', recipientId: '', senderName: 'foo' })).resolves.toBe(
+        JobStatus.Success,
+      );
       expect(mocks.job.queue).toHaveBeenCalledWith({
         name: JobName.SendMail,
         data: expect.objectContaining({ subject: expect.stringContaining('You have been added to a shared album') }),
@@ -323,7 +367,8 @@ describe(NotificationService.name, () => {
     });
 
     it('should send invite email without album thumbnail if thumbnail asset does not exist', async () => {
-      mocks.album.getById.mockResolvedValue(albumStub.emptyWithValidThumbnail);
+      const album = AlbumFactory.create({ albumThumbnailAssetId: newUuid() });
+      mocks.album.getById.mockResolvedValue(getForAlbum(album));
       mocks.user.get.mockResolvedValue({
         ...userStub.user1,
         metadata: [
@@ -334,12 +379,15 @@ describe(NotificationService.name, () => {
         ],
       });
       mocks.systemMetadata.get.mockResolvedValue({ server: {} });
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
       mocks.email.renderEmail.mockResolvedValue({ html: '', text: '' });
       mocks.assetJob.getAlbumThumbnailFiles.mockResolvedValue([]);
 
-      await expect(sut.handleAlbumInvite({ id: '', recipientId: '' })).resolves.toBe(JobStatus.Success);
+      await expect(sut.handleAlbumInvite({ id: '', recipientId: '', senderName: 'foo' })).resolves.toBe(
+        JobStatus.Success,
+      );
       expect(mocks.assetJob.getAlbumThumbnailFiles).toHaveBeenCalledWith(
-        albumStub.emptyWithValidThumbnail.albumThumbnailAssetId,
+        album.albumThumbnailAssetId,
         AssetFileType.Thumbnail,
       );
       expect(mocks.job.queue).toHaveBeenCalledWith({
@@ -352,7 +400,9 @@ describe(NotificationService.name, () => {
     });
 
     it('should send invite email with album thumbnail as jpeg', async () => {
-      mocks.album.getById.mockResolvedValue(albumStub.emptyWithValidThumbnail);
+      const assetFile = AssetFileFactory.create({ type: AssetFileType.Thumbnail });
+      const album = AlbumFactory.create({ albumThumbnailAssetId: assetFile.assetId });
+      mocks.album.getById.mockResolvedValue(getForAlbum(album));
       mocks.user.get.mockResolvedValue({
         ...userStub.user1,
         metadata: [
@@ -363,14 +413,15 @@ describe(NotificationService.name, () => {
         ],
       });
       mocks.systemMetadata.get.mockResolvedValue({ server: {} });
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
       mocks.email.renderEmail.mockResolvedValue({ html: '', text: '' });
-      mocks.assetJob.getAlbumThumbnailFiles.mockResolvedValue([
-        { id: '1', type: AssetFileType.Thumbnail, path: 'path-to-thumb.jpg' },
-      ]);
+      mocks.assetJob.getAlbumThumbnailFiles.mockResolvedValue([assetFile]);
 
-      await expect(sut.handleAlbumInvite({ id: '', recipientId: '' })).resolves.toBe(JobStatus.Success);
+      await expect(sut.handleAlbumInvite({ id: '', recipientId: '', senderName: 'foo' })).resolves.toBe(
+        JobStatus.Success,
+      );
       expect(mocks.assetJob.getAlbumThumbnailFiles).toHaveBeenCalledWith(
-        albumStub.emptyWithValidThumbnail.albumThumbnailAssetId,
+        album.albumThumbnailAssetId,
         AssetFileType.Thumbnail,
       );
       expect(mocks.job.queue).toHaveBeenCalledWith({
@@ -383,7 +434,11 @@ describe(NotificationService.name, () => {
     });
 
     it('should send invite email with album thumbnail and arbitrary extension', async () => {
-      mocks.album.getById.mockResolvedValue(albumStub.emptyWithValidThumbnail);
+      const asset = AssetFactory.from().file({ type: AssetFileType.Thumbnail }).build();
+      const album = AlbumFactory.from({ albumThumbnailAssetId: asset.id })
+        .asset(asset, (builder) => builder.exif())
+        .build();
+      mocks.album.getById.mockResolvedValue(getForAlbum(album));
       mocks.user.get.mockResolvedValue({
         ...userStub.user1,
         metadata: [
@@ -394,19 +449,22 @@ describe(NotificationService.name, () => {
         ],
       });
       mocks.systemMetadata.get.mockResolvedValue({ server: {} });
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
       mocks.email.renderEmail.mockResolvedValue({ html: '', text: '' });
-      mocks.assetJob.getAlbumThumbnailFiles.mockResolvedValue([assetStub.image.files[2]]);
+      mocks.assetJob.getAlbumThumbnailFiles.mockResolvedValue([asset.files[0]]);
 
-      await expect(sut.handleAlbumInvite({ id: '', recipientId: '' })).resolves.toBe(JobStatus.Success);
+      await expect(sut.handleAlbumInvite({ id: '', recipientId: '', senderName: 'foo' })).resolves.toBe(
+        JobStatus.Success,
+      );
       expect(mocks.assetJob.getAlbumThumbnailFiles).toHaveBeenCalledWith(
-        albumStub.emptyWithValidThumbnail.albumThumbnailAssetId,
+        album.albumThumbnailAssetId,
         AssetFileType.Thumbnail,
       );
       expect(mocks.job.queue).toHaveBeenCalledWith({
         name: JobName.SendMail,
         data: expect.objectContaining({
           subject: expect.stringContaining('You have been added to a shared album'),
-          imageAttachments: [{ filename: 'album-thumbnail.ext', path: expect.anything(), cid: expect.anything() }],
+          imageAttachments: [{ filename: 'album-thumbnail.jpg', path: expect.anything(), cid: expect.anything() }],
         }),
       });
     });
@@ -419,87 +477,79 @@ describe(NotificationService.name, () => {
     });
 
     it('should skip if owner could not be found', async () => {
-      mocks.album.getById.mockResolvedValue(albumStub.emptyWithValidThumbnail);
+      mocks.album.getById.mockResolvedValue(getForAlbum(AlbumFactory.from().owner({ id: 'non-existent' }).build()));
 
       await expect(sut.handleAlbumUpdate({ id: '', recipientId: '1' })).resolves.toBe(JobStatus.Skipped);
       expect(mocks.systemMetadata.get).not.toHaveBeenCalled();
     });
 
     it('should skip recipient that could not be looked up', async () => {
-      mocks.album.getById.mockResolvedValue({
-        ...albumStub.emptyWithValidThumbnail,
-        albumUsers: [{ user: { id: userStub.user1.id } } as AlbumUser],
-      });
-      mocks.user.get.mockResolvedValueOnce(userStub.user1);
+      const album = AlbumFactory.from().albumUser({ userId: 'non-existent' }).build();
+      mocks.album.getById.mockResolvedValue(getForAlbum(album));
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
       mocks.email.renderEmail.mockResolvedValue({ html: '', text: '' });
       mocks.assetJob.getAlbumThumbnailFiles.mockResolvedValue([]);
 
-      await sut.handleAlbumUpdate({ id: '', recipientId: userStub.user1.id });
-      expect(mocks.user.get).toHaveBeenCalledWith(userStub.user1.id, { withDeleted: false });
+      await sut.handleAlbumUpdate({ id: '', recipientId: 'non-existent' });
+      expect(mocks.user.get).toHaveBeenCalledWith('non-existent', { withDeleted: false });
       expect(mocks.email.renderEmail).not.toHaveBeenCalled();
     });
 
     it('should skip recipient with disabled email notifications', async () => {
-      mocks.album.getById.mockResolvedValue({
-        ...albumStub.emptyWithValidThumbnail,
-        albumUsers: [{ user: { id: userStub.user1.id } } as AlbumUser],
-      });
-      mocks.user.get.mockResolvedValue({
-        ...userStub.user1,
-        metadata: [
-          {
-            key: UserMetadataKey.Preferences,
-            value: { emailNotifications: { enabled: false, albumUpdate: true } },
-          },
-        ],
-      });
+      const user = UserFactory.from()
+        .metadata({
+          key: UserMetadataKey.Preferences,
+          value: { emailNotifications: { enabled: false, albumUpdate: true } },
+        })
+        .build();
+      const album = AlbumFactory.from().albumUser({ userId: user.id }).build();
+      mocks.album.getById.mockResolvedValue(getForAlbum(album));
+      mocks.user.get.mockResolvedValue(user);
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
       mocks.email.renderEmail.mockResolvedValue({ html: '', text: '' });
       mocks.assetJob.getAlbumThumbnailFiles.mockResolvedValue([]);
 
-      await sut.handleAlbumUpdate({ id: '', recipientId: userStub.user1.id });
-      expect(mocks.user.get).toHaveBeenCalledWith(userStub.user1.id, { withDeleted: false });
+      await sut.handleAlbumUpdate({ id: '', recipientId: user.id });
+      expect(mocks.user.get).toHaveBeenCalledWith(user.id, { withDeleted: false });
       expect(mocks.email.renderEmail).not.toHaveBeenCalled();
     });
 
     it('should skip recipient with disabled email notifications for the album update event', async () => {
-      mocks.album.getById.mockResolvedValue({
-        ...albumStub.emptyWithValidThumbnail,
-        albumUsers: [{ user: { id: userStub.user1.id } } as AlbumUser],
-      });
-      mocks.user.get.mockResolvedValue({
-        ...userStub.user1,
-        metadata: [
-          {
-            key: UserMetadataKey.Preferences,
-            value: { emailNotifications: { enabled: true, albumUpdate: false } },
-          },
-        ],
-      });
+      const user = UserFactory.from()
+        .metadata({
+          key: UserMetadataKey.Preferences,
+          value: { emailNotifications: { enabled: true, albumUpdate: false } },
+        })
+        .build();
+      const album = AlbumFactory.from().albumUser({ userId: user.id }).build();
+      mocks.album.getById.mockResolvedValue(getForAlbum(album));
+      mocks.user.get.mockResolvedValue(user);
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
       mocks.email.renderEmail.mockResolvedValue({ html: '', text: '' });
       mocks.assetJob.getAlbumThumbnailFiles.mockResolvedValue([]);
 
-      await sut.handleAlbumUpdate({ id: '', recipientId: userStub.user1.id });
-      expect(mocks.user.get).toHaveBeenCalledWith(userStub.user1.id, { withDeleted: false });
+      await sut.handleAlbumUpdate({ id: '', recipientId: user.id });
+      expect(mocks.user.get).toHaveBeenCalledWith(user.id, { withDeleted: false });
       expect(mocks.email.renderEmail).not.toHaveBeenCalled();
     });
 
     it('should send email', async () => {
-      mocks.album.getById.mockResolvedValue({
-        ...albumStub.emptyWithValidThumbnail,
-        albumUsers: [{ user: { id: userStub.user1.id } } as AlbumUser],
-      });
-      mocks.user.get.mockResolvedValue(userStub.user1);
+      const user = UserFactory.create();
+      const album = AlbumFactory.from().albumUser({ userId: user.id }).build();
+      mocks.album.getById.mockResolvedValue(getForAlbum(album));
+      mocks.user.get.mockResolvedValue(user);
+      mocks.notification.create.mockResolvedValue(notificationStub.albumEvent);
       mocks.email.renderEmail.mockResolvedValue({ html: '', text: '' });
       mocks.assetJob.getAlbumThumbnailFiles.mockResolvedValue([]);
 
-      await sut.handleAlbumUpdate({ id: '', recipientId: userStub.user1.id });
-      expect(mocks.user.get).toHaveBeenCalledWith(userStub.user1.id, { withDeleted: false });
+      await sut.handleAlbumUpdate({ id: '', recipientId: user.id });
+      expect(mocks.user.get).toHaveBeenCalledWith(user.id, { withDeleted: false });
       expect(mocks.email.renderEmail).toHaveBeenCalled();
       expect(mocks.job.queue).toHaveBeenCalled();
     });
 
     it('should add new recipients for new images if job is already queued', async () => {
-      await sut.onAlbumUpdate({ id: '1', recipientId: '2' } as INotifyAlbumUpdateJob);
+      await sut.onAlbumUpdate({ id: '1', userIds: ['2'], recipientIds: ['2'] });
       expect(mocks.job.removeJob).toHaveBeenCalledWith(JobName.NotifyAlbumUpdate, '1/2');
       expect(mocks.job.queue).toHaveBeenCalledWith({
         name: JobName.NotifyAlbumUpdate,

@@ -1,23 +1,25 @@
 <script lang="ts">
+  import { cleanClass } from '#lib';
+
   interface Props {
     height: number;
-    title: string;
+    title?: string;
+    invisible?: boolean;
+    class?: string;
   }
 
-  let { height = 0, title }: Props = $props();
+  let { height = 0, title, invisible = false, class: className }: Props = $props();
 </script>
 
-<div class="overflow-clip" style:height={height + 'px'}>
-  <div
-    class="flex pt-7 pb-5 h-6 place-items-center text-xs font-medium text-immich-fg bg-light dark:text-immich-dark-fg md:text-sm"
-  >
-    {title}
-  </div>
-  <div
-    class="animate-pulse absolute h-full ms-[10px] me-[10px]"
-    style:width="calc(100% - 20px)"
-    data-skeleton="true"
-  ></div>
+<div class={cleanClass('overflow-clip', invisible && 'invisible', className)} style:height={height + 'px'}>
+  {#if title}
+    <div
+      class="flex h-6 place-items-center pt-7 pb-5 text-xs font-medium text-immich-fg max-md:pt-5 max-md:pb-3 md:text-sm dark:text-immich-dark-fg"
+    >
+      {title}
+    </div>
+  {/if}
+  <div class="size-full animate-pulse" data-skeleton="true"></div>
 </div>
 
 <style>
@@ -34,15 +36,7 @@
   :global(.dark) [data-skeleton] {
     background-image: url('/dark_skeleton.png');
   }
-  @keyframes delayedVisibility {
-    to {
-      visibility: visible;
-    }
-  }
-  [data-skeleton] {
-    visibility: hidden;
-    animation:
-      0s linear 0.1s forwards delayedVisibility,
-      pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  .invisible [data-skeleton] {
+    visibility: hidden !important;
   }
 </style>

@@ -75,15 +75,32 @@ _INSIGHTFACE_MODELS = {
 }
 
 
+_PADDLE_MODELS = {
+    "PP-OCRv5_server",
+    "PP-OCRv5_mobile",
+    "CH__PP-OCRv5_server",
+    "CH__PP-OCRv5_mobile",
+    "EL__PP-OCRv5_mobile",
+    "EN__PP-OCRv5_mobile",
+    "ESLAV__PP-OCRv5_mobile",
+    "KOREAN__PP-OCRv5_mobile",
+    "LATIN__PP-OCRv5_mobile",
+    "TH__PP-OCRv5_mobile",
+    "PP-OCRv6_tiny",
+    "PP-OCRv6_small",
+    "PP-OCRv6_medium",
+}
+
 SUPPORTED_PROVIDERS = [
+    "nv_tensorrt_rtx",
     "CUDAExecutionProvider",
-    "ROCMExecutionProvider",
+    "MIGraphXExecutionProvider",
     "OpenVINOExecutionProvider",
+    "CoreMLExecutionProvider",
     "CPUExecutionProvider",
 ]
 
-RKNN_SUPPORTED_SOCS = ["rk3566", "rk3568", "rk3576", "rk3588"]
-RKNN_COREMASK_SUPPORTED_SOCS = ["rk3576", "rk3588"]
+RKNN_NPU_CORES = {"rk3566": 1, "rk3568": 1, "rk3576": 2, "rk3588": 3}
 
 
 WEBLATE_TO_FLORES200 = {
@@ -157,5 +174,8 @@ def get_model_source(model_name: str) -> ModelSource | None:
 
     if cleaned_name in _OPENCLIP_MODELS:
         return ModelSource.OPENCLIP
+
+    if cleaned_name in _PADDLE_MODELS:
+        return ModelSource.PADDLE
 
     return None

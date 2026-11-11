@@ -22,9 +22,14 @@ class BackgroundWorkerSettings {
 abstract class BackgroundWorkerFgHostApi {
   void enable();
 
+  void saveNotificationMessage(String title, String body);
+
   void configure(BackgroundWorkerSettings settings);
 
   void disable();
+
+  // iOS Only: true when the OS started the process in the background for one of its background tasks
+  bool wasLaunchedInBackground();
 }
 
 @HostApi()
@@ -32,8 +37,6 @@ abstract class BackgroundWorkerBgHostApi {
   // Called from the background flutter engine when it has bootstrapped and established the
   // required platform channels to notify the native side to start the background upload
   void onInitialized();
-
-  void showNotification(String title, String content);
 
   // Called from the background flutter engine to request the native side to cleanup
   void close();
@@ -46,8 +49,9 @@ abstract class BackgroundWorkerFlutterApi {
   void onIosUpload(bool isRefresh, int? maxSeconds);
 
   // Android Only: Called when the Android background upload is triggered
+  // Returns whether the native side needs to retry the run
   @async
-  void onAndroidUpload();
+  bool onAndroidUpload(int? maxMinutes);
 
   @async
   void cancel();

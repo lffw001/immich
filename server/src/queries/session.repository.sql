@@ -4,7 +4,8 @@
 select
   "id",
   "expiresAt",
-  "pinExpiresAt"
+  "pinExpiresAt",
+  "oauthBearerToken"
 from
   "session"
 where
@@ -23,6 +24,7 @@ select
   "session"."id",
   "session"."updatedAt",
   "session"."pinExpiresAt",
+  "session"."appVersion",
   (
     select
       to_json(obj)
@@ -72,6 +74,12 @@ order by
 delete from "session"
 where
   "id" = $1::uuid
+
+-- SessionRepository.invalidateAll
+delete from "session"
+where
+  "userId" = $1
+  and "id" != $2
 
 -- SessionRepository.lockAll
 update "session"

@@ -1,8 +1,9 @@
+import 'dart:async';
+
 import 'package:auto_route/auto_route.dart';
 import 'package:flutter/services.dart';
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/routing/router.dart';
-
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/local_auth.service.dart';
 import 'package:immich_mobile/services/secure_storage.service.dart';
@@ -20,7 +21,7 @@ class LockedGuard extends AutoRouteGuard {
   LockedGuard(this._apiService, this._secureStorageService, this._localAuth);
 
   @override
-  void onNavigation(NavigationResolver resolver, StackRouter router) async {
+  Future<void> onNavigation(NavigationResolver resolver, StackRouter router) async {
     final authStatus = await _apiService.authenticationApi.getAuthStatus();
 
     if (authStatus == null) {
@@ -30,7 +31,7 @@ class LockedGuard extends AutoRouteGuard {
 
     /// Check if a pincode has been created but this user. Show the form to create if not exist
     if (!authStatus.pinCode) {
-      router.push(PinAuthRoute(createPinCode: true));
+      unawaited(router.push(PinAuthRoute(createPinCode: true)));
     }
 
     if (authStatus.isElevated) {
@@ -42,7 +43,7 @@ class LockedGuard extends AutoRouteGuard {
     /// the user has enabled the biometric authentication
     final securePinCode = await _secureStorageService.read(kSecuredPinCode);
     if (securePinCode == null) {
-      router.push(PinAuthRoute());
+      unawaited(router.push(PinAuthRoute()));
       return;
     }
 
@@ -54,27 +55,24 @@ class LockedGuard extends AutoRouteGuard {
         return;
       }
 
-      await _apiService.authenticationApi.unlockAuthSession(SessionUnlockDto(pinCode: securePinCode));
+      await _apiService.authenticationApi.unlockAuthSession(SessionUnlockDto(pinCode: Optional.present(securePinCode)));
 
       resolver.next(true);
     } on PlatformException catch (error) {
       switch (error.code) {
         case auth_error.notAvailable:
           _log.severe("notAvailable: $error");
-          break;
         case auth_error.notEnrolled:
           _log.severe("not enrolled");
-          break;
         default:
           _log.severe("error");
-          break;
       }
 
       resolver.next(false);
     } on ApiException {
       // PIN code has changed, need to re-enter to access
       await _secureStorageService.delete(kSecuredPinCode);
-      router.push(PinAuthRoute());
+      unawaited(router.push(PinAuthRoute()));
     } catch (error) {
       _log.severe("Failed to access locked page", error);
       resolver.next(false);

@@ -1,13 +1,8 @@
 <script lang="ts">
-  import MenuOption from '$lib/components/shared-components/context-menu/menu-option.svelte';
-  import {
-    NotificationType,
-    notificationController,
-  } from '$lib/components/shared-components/notification/notification';
-  import { getAssetControlContext } from '$lib/components/timeline/AssetSelectControlBar.svelte';
-  import type { OnFavorite } from '$lib/utils/actions';
-  import { handleError } from '$lib/utils/handle-error';
-  import { updateAssets } from '@immich/sdk';
+  import MenuOption from '#lib/components/shared-components/context-menu/MenuOption.svelte';
+  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { toggleFavoriteAssets } from '#lib/services/asset.service.ts';
+  import type { OnFavorite } from '#lib/utils/actions.ts';
   import { IconButton } from '@immich/ui';
   import { mdiHeartMinusOutline, mdiHeartOutline, mdiTimerSand } from '@mdi/js';
   import { t } from 'svelte-i18n';
@@ -25,37 +20,14 @@
 
   let loading = $state(false);
 
-  const { clearSelect, getOwnedAssets } = getAssetControlContext();
-
   const handleFavorite = async () => {
     const isFavorite = !removeFavorite;
     loading = true;
 
     try {
-      const assets = [...getOwnedAssets()].filter((asset) => asset.isFavorite !== isFavorite);
-
-      const ids = assets.map(({ id }) => id);
-
-      if (ids.length > 0) {
-        await updateAssets({ assetBulkUpdateDto: { ids, isFavorite } });
-      }
-
-      for (const asset of assets) {
-        asset.isFavorite = isFavorite;
-      }
-
-      onFavorite?.(ids, isFavorite);
-
-      notificationController.show({
-        message: isFavorite
-          ? $t('added_to_favorites_count', { values: { count: ids.length } })
-          : $t('removed_from_favorites_count', { values: { count: ids.length } }),
-        type: NotificationType.Info,
-      });
-
-      clearSelect();
-    } catch (error) {
-      handleError(error, $t('errors.unable_to_add_remove_favorites', { values: { favorite: isFavorite } }));
+      const assets = assetMultiSelectManager.ownedAssets.filter((asset) => asset.isFavorite !== isFavorite);
+      await toggleFavoriteAssets(assets, isFavorite, onFavorite);
+      assetMultiSelectManager.clear();
     } finally {
       loading = false;
     }

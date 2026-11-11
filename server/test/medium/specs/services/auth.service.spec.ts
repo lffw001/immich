@@ -1,30 +1,34 @@
 import { BadRequestException } from '@nestjs/common';
 import { hash } from 'bcrypt';
 import { Kysely } from 'kysely';
-import { AuthType } from 'src/enum';
-import { AccessRepository } from 'src/repositories/access.repository';
-import { ConfigRepository } from 'src/repositories/config.repository';
-import { CryptoRepository } from 'src/repositories/crypto.repository';
-import { DatabaseRepository } from 'src/repositories/database.repository';
-import { EventRepository } from 'src/repositories/event.repository';
-import { LoggingRepository } from 'src/repositories/logging.repository';
-import { SessionRepository } from 'src/repositories/session.repository';
-import { StorageRepository } from 'src/repositories/storage.repository';
-import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository';
-import { UserRepository } from 'src/repositories/user.repository';
-import { DB } from 'src/schema';
-import { AuthService } from 'src/services/auth.service';
-import { mediumFactory, newMediumService } from 'test/medium.factory';
-import { factory } from 'test/small.factory';
-import { getKyselyDB } from 'test/utils';
+import { AuthType } from 'src/enum.js';
+import { AccessRepository } from 'src/repositories/access.repository.js';
+import { ClusterGroupRepository } from 'src/repositories/cluster-group.repository.js';
+import { ConfigRepository } from 'src/repositories/config.repository.js';
+import { CryptoRepository } from 'src/repositories/crypto.repository.js';
+import { DatabaseRepository } from 'src/repositories/database.repository.js';
+import { EventRepository } from 'src/repositories/event.repository.js';
+import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import { SessionRepository } from 'src/repositories/session.repository.js';
+import { StorageRepository } from 'src/repositories/storage.repository.js';
+import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
+import { TelemetryRepository } from 'src/repositories/telemetry.repository.js';
+import { UserRepository } from 'src/repositories/user.repository.js';
+import { DB } from 'src/schema/index.js';
+import { AuthService } from 'src/services/auth.service.js';
+import { mediumFactory, newMediumService } from 'test/medium.factory.js';
+import { factory } from 'test/small.factory.js';
+import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(AuthService, {
     database: db || defaultDatabase,
     real: [
       AccessRepository,
+      ClusterGroupRepository,
       ConfigRepository,
       CryptoRepository,
       DatabaseRepository,
@@ -32,7 +36,7 @@ const setup = (db?: Kysely<DB>) => {
       SystemMetadataRepository,
       UserRepository,
     ],
-    mock: [LoggingRepository, StorageRepository, EventRepository],
+    mock: [LoggingRepository, StorageRepository, EventRepository, TelemetryRepository],
   });
 };
 
@@ -43,7 +47,8 @@ beforeAll(async () => {
 describe(AuthService.name, () => {
   describe('adminSignUp', () => {
     it(`should sign up the admin`, async () => {
-      const { sut } = setup();
+      const { sut, ctx } = setup();
+      ctx.getMock(EventRepository).emit.mockResolvedValue();
       const dto = { name: 'Admin', email: 'admin@immich.cloud', password: 'password' };
 
       await expect(sut.adminSignUp(dto)).resolves.toEqual(
@@ -54,16 +59,6 @@ describe(AuthService.name, () => {
           isAdmin: true,
         }),
       );
-    });
-
-    it('should not allow a second admin to sign up', async () => {
-      const { sut, ctx } = setup();
-      await ctx.newUser({ isAdmin: true });
-      const dto = { name: 'Admin', email: 'admin@immich.cloud', password: 'password' };
-
-      const response = sut.adminSignUp(dto);
-      await expect(response).rejects.toThrow(BadRequestException);
-      await expect(response).rejects.toThrow('The server already has an admin');
     });
   });
 
@@ -129,6 +124,7 @@ describe(AuthService.name, () => {
   describe('changePassword', () => {
     it('should change the password and login with it', async () => {
       const { sut, ctx } = setup();
+      ctx.getMock(EventRepository).emit.mockResolvedValue();
       const dto = { password: 'password', newPassword: 'new-password' };
       const passwordHashed = await hash(dto.password, 10);
       const { user } = await ctx.newUser({ password: passwordHashed });

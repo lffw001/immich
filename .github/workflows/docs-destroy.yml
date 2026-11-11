@@ -5,6 +5,9 @@ on:
 
 permissions: {}
 
+env:
+  TG_NON_INTERACTIVE: 'true'
+
 jobs:
   deploy:
     name: Docs Destroy
@@ -13,10 +16,24 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+      - id: token
+        uses: immich-app/devtools/actions/create-workflow-token@2760f037fd3707bb91b16e4c41dc62b8c512393e # create-workflow-token-action-v3.1.0
+        with:
+          client-id: ${{ secrets.PUSH_O_MATIC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PUSH_O_MATIC_APP_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          token: ${{ steps.token.outputs.token }}
+
+      - name: Setup Mise
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
+        with:
+          github_token: ${{ steps.token.outputs.token }}
 
       - name: Destroy Docs Subdomain
         env:
@@ -25,16 +42,12 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_STATE_POSTGRES_CONN_STR: ${{ secrets.TF_STATE_POSTGRES_CONN_STR }}
-        uses: gruntwork-io/terragrunt-action@aee21a7df999be8b471c2a8564c6cd853cb674e1 # v2.1.8
-        with:
-          tg_version: '0.58.12'
-          tofu_version: '1.7.1'
-          tg_dir: 'deployment/modules/cloudflare/docs'
-          tg_command: 'destroy -refresh=false'
+        working-directory: 'deployment/modules/cloudflare/docs'
+        run: 'mise run //deployment:tf destroy -refresh=false'
 
       - name: Comment
-        uses: actions-cool/maintain-one-comment@4b2dbf086015f892dcb5e8c1106f5fccd6c1476b # v3.2.0
+        uses: immich-app/devtools/actions/sticky-comment@5f79a5a552b30a23aa7984ffa06c3dbfaf4330f6 # sticky-comment-action-v1.1.0
         with:
-          number: ${{ github.event.number }}
+          id: docs-pr-url
+          token: ${{ steps.token.outputs.token }}
           delete: true
-          body-include: '<!-- Docs PR URL -->'

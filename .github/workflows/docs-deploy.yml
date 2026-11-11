@@ -5,6 +5,9 @@ on:
     types:
       - completed
 
+env:
+  TG_NON_INTERACTIVE: 'true'
+
 jobs:
   checks:
     name: Docs Deploy Checks
@@ -16,12 +19,21 @@ jobs:
       parameters: ${{ steps.parameters.outputs.result }}
       artifact: ${{ steps.get-artifact.outputs.result }}
     steps:
+      - id: token
+        uses: immich-app/devtools/actions/create-workflow-token@2760f037fd3707bb91b16e4c41dc62b8c512393e # create-workflow-token-action-v3.1.0
+        with:
+          client-id: ${{ secrets.PUSH_O_MATIC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PUSH_O_MATIC_APP_KEY }}
+          permission-actions: read
+          permission-pull-requests: read
+
       - if: ${{ github.event.workflow_run.conclusion != 'success' }}
         run: echo 'The triggering workflow did not succeed' && exit 1
       - name: Get artifact
         id: get-artifact
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
+          github-token: ${{ steps.token.outputs.token }}
           script: |
             let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
                owner: context.repo.owner,
@@ -38,10 +50,11 @@ jobs:
             return { found: true, id: matchArtifact.id };
       - name: Determine deploy parameters
         id: parameters
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         with:
+          github-token: ${{ steps.token.outputs.token }}
           script: |
             const eventType = context.payload.workflow_run.event;
             const isFork = context.payload.workflow_run.repository.fork;
@@ -87,9 +100,16 @@ jobs:
                 shouldDeploy: true
               };
             } else if (eventType == "release") {
+              const tag = context.payload.workflow_run.head_branch;
+              const { data: release } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
               parameters = {
                 event: "release",
-                name: context.payload.workflow_run.head_branch,
+                name: tag,
+                prerelease: release.prerelease,
                 shouldDeploy: !isFork
               };
             }
@@ -107,28 +127,46 @@ jobs:
       pull-requests: write
     if: ${{ fromJson(needs.checks.outputs.artifact).found && fromJson(needs.checks.outputs.parameters).shouldDeploy }}
     steps:
+      - id: token
+        uses: immich-app/devtools/actions/create-workflow-token@2760f037fd3707bb91b16e4c41dc62b8c512393e # create-workflow-token-action-v3.1.0
+        with:
+          client-id: ${{ secrets.PUSH_O_MATIC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PUSH_O_MATIC_APP_KEY }}
+          permission-contents: read
+          permission-actions: read
+          permission-pull-requests: write
+
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          token: ${{ steps.token.outputs.token }}
+
+      - name: Setup Mise
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
+        with:
+          github_token: ${{ steps.token.outputs.token }}
 
       - name: Load parameters
         id: parameters
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           PARAM_JSON: ${{ needs.checks.outputs.parameters }}
         with:
+          github-token: ${{ steps.token.outputs.token }}
           script: |
             const parameters = JSON.parse(process.env.PARAM_JSON);
             core.setOutput("event", parameters.event);
             core.setOutput("name", parameters.name);
+            core.setOutput("prerelease", parameters.prerelease);
             core.setOutput("shouldDeploy", parameters.shouldDeploy);
 
       - name: Download artifact
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           ARTIFACT_JSON: ${{ needs.checks.outputs.artifact }}
         with:
+          github-token: ${{ steps.token.outputs.token }}
           script: |
             let artifact = JSON.parse(process.env.ARTIFACT_JSON);
             let download = await github.rest.actions.downloadArtifact({
@@ -150,12 +188,8 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_STATE_POSTGRES_CONN_STR: ${{ secrets.TF_STATE_POSTGRES_CONN_STR }}
-        uses: gruntwork-io/terragrunt-action@aee21a7df999be8b471c2a8564c6cd853cb674e1 # v2.1.8
-        with:
-          tg_version: '0.58.12'
-          tofu_version: '1.7.1'
-          tg_dir: 'deployment/modules/cloudflare/docs'
-          tg_command: 'apply'
+        working-directory: 'deployment/modules/cloudflare/docs'
+        run: 'mise run //deployment:tf apply'
 
       - name: Deploy Docs Subdomain Output
         id: docs-output
@@ -165,53 +199,39 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_STATE_POSTGRES_CONN_STR: ${{ secrets.TF_STATE_POSTGRES_CONN_STR }}
-        uses: gruntwork-io/terragrunt-action@aee21a7df999be8b471c2a8564c6cd853cb674e1 # v2.1.8
-        with:
-          tg_version: '0.58.12'
-          tofu_version: '1.7.1'
-          tg_dir: 'deployment/modules/cloudflare/docs'
-          tg_command: 'output -json'
-
-      - name: Output Cleaning
-        id: clean
-        env:
-          TG_OUTPUT: ${{ steps.docs-output.outputs.tg_action_output }}
+        working-directory: 'deployment/modules/cloudflare/docs'
+        shell: bash
         run: |
-          CLEANED=$(echo "$TG_OUTPUT" | sed 's|%0A|\n|g ; s|%3C|<|g' | jq -c .)
-          echo "output=$CLEANED" >> $GITHUB_OUTPUT
+          mise run //deployment:tf output -json | jq -r '
+            "projectName=\(.pages_project_name.value)",
+            "subdomain=\(.immich_app_branch_subdomain.value)"
+          ' >> $GITHUB_OUTPUT
 
       - name: Publish to Cloudflare Pages
-        # TODO: Action is deprecated
-        uses: cloudflare/pages-action@f0a1cd58cd66095dee69bfa18fa5efd1dde93bca # v1.5.0
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN_PAGES_UPLOAD }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: ${{ fromJson(steps.clean.outputs.output).pages_project_name.value }}
-          workingDirectory: 'docs'
-          directory: 'build'
-          branch: ${{ steps.parameters.outputs.name }}
-          wranglerVersion: '3'
+        working-directory: docs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_PAGES_UPLOAD }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PROJECT_NAME: ${{ steps.docs-output.outputs.projectName }}
+          BRANCH_NAME: ${{ steps.parameters.outputs.name }}
+        run: mise run //docs:deploy
 
       - name: Deploy Docs Release Domain
-        if: ${{ steps.parameters.outputs.event == 'release' }}
+        if: ${{ steps.parameters.outputs.event == 'release' && steps.parameters.outputs.prerelease != 'true' }}
         env:
           TF_VAR_prefix_name: ${{ steps.parameters.outputs.name}}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_STATE_POSTGRES_CONN_STR: ${{ secrets.TF_STATE_POSTGRES_CONN_STR }}
-        uses: gruntwork-io/terragrunt-action@aee21a7df999be8b471c2a8564c6cd853cb674e1 # v2.1.8
-        with:
-          tg_version: '0.58.12'
-          tofu_version: '1.7.1'
-          tg_dir: 'deployment/modules/cloudflare/docs-release'
-          tg_command: 'apply'
+        working-directory: 'deployment/modules/cloudflare/docs-release'
+        run: 'mise run //deployment:tf apply'
 
       - name: Comment
-        uses: actions-cool/maintain-one-comment@4b2dbf086015f892dcb5e8c1106f5fccd6c1476b # v3.2.0
+        uses: immich-app/devtools/actions/sticky-comment@5f79a5a552b30a23aa7984ffa06c3dbfaf4330f6 # sticky-comment-action-v1.1.0
         if: ${{ steps.parameters.outputs.event == 'pr' }}
         with:
+          id: docs-pr-url
+          token: ${{ steps.token.outputs.token }}
           number: ${{ fromJson(needs.checks.outputs.parameters).pr_number }}
           body: |
-            📖 Documentation deployed to [${{ fromJson(steps.clean.outputs.output).immich_app_branch_subdomain.value }}](https://${{ fromJson(steps.clean.outputs.output).immich_app_branch_subdomain.value }})
-          emojis: 'rocket'
-          body-include: '<!-- Docs PR URL -->'
+            📖 Documentation deployed to [${{ steps.docs-output.outputs.subdomain }}](https://${{ steps.docs-output.outputs.subdomain }})

@@ -1,7 +1,7 @@
 cli:
   - changed-files:
       - any-glob-to-any-file:
-          - cli/src/**
+          - packages/cli/src/**
 
 documentation:
   - changed-files:
@@ -31,7 +31,7 @@ documentation:
 🧠machine-learning:
   - changed-files:
       - any-glob-to-any-file:
-          - machine-learning/app/**
+          - machine-learning/**
 
 changelog:translation:
   - head-branch: ['^chore/translations$']

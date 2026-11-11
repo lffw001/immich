@@ -1,16 +1,17 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { OnEvent, OnJob } from 'src/decorators';
-import { mapAsset } from 'src/dtos/asset-response.dto';
-import { AuthDto } from 'src/dtos/auth.dto';
+import { OnEvent, OnJob } from 'src/decorators.js';
+import { MapAlbumDto } from 'src/dtos/album.dto.js';
+import { mapAsset } from 'src/dtos/asset-response.dto.js';
+import { AuthDto } from 'src/dtos/auth.dto.js';
+import { SystemConfigSmtpDto } from 'src/dtos/config.dto.js';
 import {
-  mapNotification,
   NotificationDeleteAllDto,
   NotificationDto,
   NotificationSearchDto,
   NotificationUpdateAllDto,
   NotificationUpdateDto,
-} from 'src/dtos/notification.dto';
-import { SystemConfigSmtpDto } from 'src/dtos/system-config.dto';
+  mapNotification,
+} from 'src/dtos/notification.dto.js';
 import {
   AssetFileType,
   JobName,
@@ -19,15 +20,15 @@ import {
   NotificationType,
   Permission,
   QueueName,
-} from 'src/enum';
-import { EmailTemplate } from 'src/repositories/email.repository';
-import { ArgOf } from 'src/repositories/event.repository';
-import { BaseService } from 'src/services/base.service';
-import { EmailImageAttachment, JobOf } from 'src/types';
-import { getFilenameExtension } from 'src/utils/file';
-import { getExternalDomain } from 'src/utils/misc';
-import { isEqualObject } from 'src/utils/object';
-import { getPreferences } from 'src/utils/preferences';
+} from 'src/enum.js';
+import { EmailTemplate } from 'src/repositories/email.repository.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
+import { BaseService } from 'src/services/base.service.js';
+import type { EmailImageAttachment, JobOf } from 'src/types.js';
+import { getFilenameExtension } from 'src/utils/file.js';
+import { getExternalDomain } from 'src/utils/misc.js';
+import { isEqualObject } from 'src/utils/object.js';
+import { getPreferences } from 'src/utils/preferences.js';
 
 @Injectable()
 export class NotificationService extends BaseService {
@@ -77,8 +78,8 @@ export class NotificationService extends BaseService {
     await this.notificationRepository.cleanup();
   }
 
-  @OnEvent({ name: 'JobFailed' })
-  async onJobFailed({ job, error }: ArgOf<'JobFailed'>) {
+  @OnEvent({ name: 'JobError' })
+  async onJobError({ job, error }: ArgOf<'JobError'>) {
     const admin = await this.userRepository.getAdmin();
     if (!admin) {
       return;
@@ -97,7 +98,7 @@ export class NotificationService extends BaseService {
           description: `Job ${[job.name]} failed with error: ${errorMessage}`,
         });
 
-        this.eventRepository.clientSend('on_notification', admin.id, mapNotification(item));
+        this.websocketRepository.clientSend('on_notification', admin.id, mapNotification(item));
         break;
       }
 
@@ -109,8 +110,32 @@ export class NotificationService extends BaseService {
 
   @OnEvent({ name: 'ConfigUpdate' })
   onConfigUpdate({ oldConfig, newConfig }: ArgOf<'ConfigUpdate'>) {
-    this.eventRepository.clientBroadcast('on_config_update');
-    this.eventRepository.serverSend('ConfigUpdate', { oldConfig, newConfig });
+    this.websocketRepository.clientBroadcast('on_config_update');
+    this.websocketRepository.serverSend('ConfigUpdate', { oldConfig, newConfig });
+  }
+
+  @OnEvent({ name: 'AppRestart' })
+  onAppRestart(state: ArgOf<'AppRestart'>) {
+    this.websocketRepository.clientBroadcast('AppRestartV1', {
+      isMaintenanceMode: state.isMaintenanceMode,
+    });
+
+    this.websocketRepository.serverSend('AppRestart', state);
+  }
+
+  @OnEvent({ name: 'LibraryCreate' })
+  onLibraryCreate() {
+    this.websocketRepository.serverSend('LibraryCreate');
+  }
+
+  @OnEvent({ name: 'LibraryUpdate' })
+  onLibraryUpdate() {
+    this.websocketRepository.serverSend('LibraryUpdate');
+  }
+
+  @OnEvent({ name: 'LibraryDelete' })
+  onLibraryDelete() {
+    this.websocketRepository.serverSend('LibraryDelete');
   }
 
   @OnEvent({ name: 'ConfigValidate', priority: -100 })
@@ -124,13 +149,13 @@ export class NotificationService extends BaseService {
       }
     } catch (error: Error | any) {
       this.logger.error(`Failed to validate SMTP configuration: ${error}`, error?.stack);
-      throw new Error(`Invalid SMTP configuration: ${error}`);
+      throw new Error('Invalid SMTP configuration', { cause: error });
     }
   }
 
   @OnEvent({ name: 'AssetHide' })
   onAssetHide({ assetId, userId }: ArgOf<'AssetHide'>) {
-    this.eventRepository.clientSend('on_asset_hidden', userId, assetId);
+    this.websocketRepository.clientSend('on_asset_hidden', userId, assetId);
   }
 
   @OnEvent({ name: 'AssetShow' })
@@ -140,17 +165,17 @@ export class NotificationService extends BaseService {
 
   @OnEvent({ name: 'AssetTrash' })
   onAssetTrash({ assetId, userId }: ArgOf<'AssetTrash'>) {
-    this.eventRepository.clientSend('on_asset_trash', userId, [assetId]);
+    this.websocketRepository.clientSend('on_asset_trash', userId, [assetId]);
   }
 
   @OnEvent({ name: 'AssetDelete' })
   onAssetDelete({ assetId, userId }: ArgOf<'AssetDelete'>) {
-    this.eventRepository.clientSend('on_asset_delete', userId, assetId);
+    this.websocketRepository.clientSend('on_asset_delete', userId, assetId);
   }
 
   @OnEvent({ name: 'AssetTrashAll' })
   onAssetsTrash({ assetIds, userId }: ArgOf<'AssetTrashAll'>) {
-    this.eventRepository.clientSend('on_asset_trash', userId, assetIds);
+    this.websocketRepository.clientSend('on_asset_trash', userId, assetIds);
   }
 
   @OnEvent({ name: 'AssetMetadataExtracted' })
@@ -159,35 +184,39 @@ export class NotificationService extends BaseService {
       return;
     }
 
-    const [asset] = await this.assetRepository.getByIdsWithAllRelationsButStacks([assetId]);
+    const [asset] = await this.assetRepository.getByIdsWithAllRelationsButStacks([assetId], userId);
     if (asset) {
-      this.eventRepository.clientSend('on_asset_update', userId, mapAsset(asset));
+      this.websocketRepository.clientSend(
+        'on_asset_update',
+        userId,
+        mapAsset(asset, { auth: { user: { id: userId } } as AuthDto }),
+      );
     }
   }
 
   @OnEvent({ name: 'AssetRestoreAll' })
   onAssetsRestore({ assetIds, userId }: ArgOf<'AssetRestoreAll'>) {
-    this.eventRepository.clientSend('on_asset_restore', userId, assetIds);
+    this.websocketRepository.clientSend('on_asset_restore', userId, assetIds);
   }
 
   @OnEvent({ name: 'StackCreate' })
   onStackCreate({ userId }: ArgOf<'StackCreate'>) {
-    this.eventRepository.clientSend('on_asset_stack_update', userId);
+    this.websocketRepository.clientSend('on_asset_stack_update', userId);
   }
 
   @OnEvent({ name: 'StackUpdate' })
   onStackUpdate({ userId }: ArgOf<'StackUpdate'>) {
-    this.eventRepository.clientSend('on_asset_stack_update', userId);
+    this.websocketRepository.clientSend('on_asset_stack_update', userId);
   }
 
   @OnEvent({ name: 'StackDelete' })
   onStackDelete({ userId }: ArgOf<'StackDelete'>) {
-    this.eventRepository.clientSend('on_asset_stack_update', userId);
+    this.websocketRepository.clientSend('on_asset_stack_update', userId);
   }
 
   @OnEvent({ name: 'StackDeleteAll' })
   onStacksDelete({ userId }: ArgOf<'StackDeleteAll'>) {
-    this.eventRepository.clientSend('on_asset_stack_update', userId);
+    this.websocketRepository.clientSend('on_asset_stack_update', userId);
   }
 
   @OnEvent({ name: 'UserSignup' })
@@ -197,24 +226,49 @@ export class NotificationService extends BaseService {
     }
   }
 
+  @OnEvent({ name: 'UserDelete' })
+  onUserDelete({ id }: ArgOf<'UserDelete'>) {
+    this.websocketRepository.clientBroadcast('on_user_delete', id);
+  }
+
   @OnEvent({ name: 'AlbumUpdate' })
-  async onAlbumUpdate({ id, recipientId }: ArgOf<'AlbumUpdate'>) {
-    await this.jobRepository.removeJob(JobName.NotifyAlbumUpdate, `${id}/${recipientId}`);
-    await this.jobRepository.queue({
-      name: JobName.NotifyAlbumUpdate,
-      data: { id, recipientId, delay: NotificationService.albumUpdateEmailDelayMs },
-    });
+  async onAlbumUpdate({ id, userIds, recipientIds }: ArgOf<'AlbumUpdate'>) {
+    for (const userId of userIds) {
+      this.websocketRepository.clientSend('on_album_update', userId, id);
+    }
+
+    for (const recipientId of recipientIds) {
+      await this.jobRepository.removeJob(JobName.NotifyAlbumUpdate, `${id}/${recipientId}`);
+      await this.jobRepository.queue({
+        name: JobName.NotifyAlbumUpdate,
+        data: { id, recipientId, delay: NotificationService.albumUpdateEmailDelayMs },
+      });
+    }
   }
 
   @OnEvent({ name: 'AlbumInvite' })
-  async onAlbumInvite({ id, userId }: ArgOf<'AlbumInvite'>) {
-    await this.jobRepository.queue({ name: JobName.NotifyAlbumInvite, data: { id, recipientId: userId } });
+  async onAlbumInvite({ id, userId, senderName }: ArgOf<'AlbumInvite'>) {
+    await this.jobRepository.queue({ name: JobName.NotifyAlbumInvite, data: { id, recipientId: userId, senderName } });
+  }
+
+  @OnEvent({ name: 'ClusterGroupRequest' })
+  async onClusterGroupRequest({ clusterGroupId, userId, senderName }: ArgOf<'ClusterGroupRequest'>) {
+    const item = await this.notificationRepository.create({
+      userId,
+      type: NotificationType.ClusterGroupRequest,
+      level: NotificationLevel.Info,
+      title: 'Cluster Group Request',
+      description: `${senderName} asked you to join their cluster group`,
+      data: JSON.stringify({ clusterGroupId }),
+    });
+
+    this.websocketRepository.clientSend('on_notification', userId, mapNotification(item));
   }
 
   @OnEvent({ name: 'SessionDelete' })
   onSessionDelete({ sessionId }: ArgOf<'SessionDelete'>) {
     // after the response is sent
-    setTimeout(() => this.eventRepository.clientSend('on_session_delete', sessionId, sessionId), 500);
+    setTimeout(() => this.websocketRepository.clientSend('on_session_delete', sessionId, sessionId), 500);
   }
 
   async sendTestEmail(id: string, dto: SystemConfigSmtpDto, tempTemplate?: string) {
@@ -284,8 +338,8 @@ export class NotificationService extends BaseService {
   }
 
   @OnJob({ name: JobName.NotifyAlbumInvite, queue: QueueName.Notification })
-  async handleAlbumInvite({ id, recipientId }: JobOf<JobName.NotifyAlbumInvite>) {
-    const album = await this.albumRepository.getById(id, { withAssets: false });
+  async handleAlbumInvite({ id, recipientId, senderName }: JobOf<JobName.NotifyAlbumInvite>) {
+    const album = await this.albumRepository.getById(id);
     if (!album) {
       return JobStatus.Skipped;
     }
@@ -294,6 +348,8 @@ export class NotificationService extends BaseService {
     if (!recipient) {
       return JobStatus.Skipped;
     }
+
+    await this.sendAlbumLocalNotification(album, recipientId, NotificationType.AlbumInvite, senderName);
 
     const { emailNotifications } = getPreferences(recipient.metadata);
 
@@ -310,7 +366,7 @@ export class NotificationService extends BaseService {
         baseUrl: getExternalDomain(server),
         albumId: album.id,
         albumName: album.albumName,
-        senderName: album.owner.name,
+        senderName,
         recipientName: recipient.name,
         cid: attachment ? attachment.cid : undefined,
       },
@@ -333,16 +389,18 @@ export class NotificationService extends BaseService {
 
   @OnJob({ name: JobName.NotifyAlbumUpdate, queue: QueueName.Notification })
   async handleAlbumUpdate({ id, recipientId }: JobOf<JobName.NotifyAlbumUpdate>) {
-    const album = await this.albumRepository.getById(id, { withAssets: false });
+    const album = await this.albumRepository.getById(id);
 
     if (!album) {
       return JobStatus.Skipped;
     }
 
-    const owner = await this.userRepository.get(album.ownerId, { withDeleted: false });
-    if (!owner) {
+    const recipient = await this.userRepository.get(recipientId, { withDeleted: false });
+    if (!recipient) {
       return JobStatus.Skipped;
     }
+
+    await this.sendAlbumLocalNotification(album, recipientId, NotificationType.AlbumUpdate);
 
     const attachment = await this.getAlbumThumbnailAttachment(album);
 
@@ -430,5 +488,26 @@ export class NotificationService extends BaseService {
       path: albumThumbnailFiles[0].path,
       cid: 'album-thumbnail',
     };
+  }
+
+  private async sendAlbumLocalNotification(
+    album: MapAlbumDto,
+    userId: string,
+    type: NotificationType.AlbumInvite | NotificationType.AlbumUpdate,
+    senderName?: string,
+  ) {
+    const isInvite = type === NotificationType.AlbumInvite;
+    const item = await this.notificationRepository.create({
+      userId,
+      type,
+      level: isInvite ? NotificationLevel.Success : NotificationLevel.Info,
+      title: isInvite ? 'Shared Album Invitation' : 'Shared Album Update',
+      description: isInvite
+        ? `${senderName} shared an album (${album.albumName}) with you`
+        : `New media has been added to the album (${album.albumName})`,
+      data: JSON.stringify({ albumId: album.id }),
+    });
+
+    this.websocketRepository.clientSend('on_notification', userId, mapNotification(item));
   }
 }
